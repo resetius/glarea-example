@@ -49,17 +49,230 @@ struct vertex_info {
 };
 
 /* the vertex data is constant */
+#if 0
 static const struct vertex_info vertex_data[] = {
-  { {  0.0f,  0.500f, 0.0f }, { 1.f, 0.f, 0.f } },
-  { {  0.5f, -0.366f, 0.0f }, { 0.f, 1.f, 0.f } },
-  { { -0.5f, -0.366f, 0.0f }, { 0.f, 0.f, 1.f } },
+  { {  0.0f,  0.500f, 0.0f }, { 1.f, 1.f, 0.f } },
+  { {  0.5f, -0.366f, 0.0f }, { 1.f, 1.f, 0.f } },
+  { { -0.5f, -0.366f, 0.0f }, { 1.f, 1.f, 0.f } },
 };
+#endif
+
+static struct vertex_info* vertex_data = NULL;
+static int nvertex = 0;
+
+struct Point {
+    float v[3];
+};
+
+struct VectorOfPoints {
+    int size;
+    int capacity;
+    struct Point* data;
+};
+
+static int get_iteration(double x0, double y0, double z0) {
+    int n = 8;
+    double x = 0;
+    double y = 0;
+    double z = 0;
+    double xn, yn, zn;
+    int i;
+
+    double A, B, C, D;
+    A = B = C = D = 0;
+    C = 2;
+    
+    for (i = 1; i<32; i=i+1) {
+        // wikipedia
+        
+        double x2 = x*x, x3 = x*x2, x4 = x*x3;
+        double y2 = y*y, y3 = y*y2, y4 = y*y3;
+        double z2 = z*z, z3 = z*z2, z4 = z*z3;
+
+        xn = x*x4 - 10*x3*(y2 + A*y*z + z2) +5*x*(y4 + B*y3*z + C*y2*z2 + B*y*z3 + z4)
+            + D*x2*y*z*(y+z) + x0;
+        yn = y*y4 - 10*y3*(z2 + A*x*z + x2) +5*y*(z4 + B*z3*x + C*z2*x2 + B*z*x3 + x4)
+            + D*y2*z*x*(z+x) + y0;
+        zn = z*z4 - 10*z3*(x2 + A*x*y + y2) +5*z*(x4 + B*x3*y + C*x2*y2 + B*x*y3 + y4)
+            + D*z2*x*y*(x+y) + z0;
+            
+        if (sqrt(xn*xn+yn*yn+zn*zn) > 2) {
+            return i;
+        }   
+        x = xn; y = yn; z = zn;
+    }
+    return 0;
+}
+
+static void calc_surface() {
+    float d = 0.005;
+    int stride = 1024;
+    int width = stride;
+    int height = stride;
+    int depth = stride;
+    unsigned long long* mask = calloc(1, width*height*depth);
+#pragma omp parallel for
+    for (int zbyte = 0; zbyte < depth/64; zbyte=zbyte+1) {
+        for (int z = zbyte*64; z < (zbyte+1)*64; z=z+1) {
+     //    for (int z = 0; z < depth; z=z+1) {
+            for (int y = 0; y < height; y=y+1) {
+                for (int x = 0; x < width; x=x+1) {
+                    double v[3] = {x,y,z};
+                    for (int i = 0; i < 3; i=i+1) {
+                        v[i] /= stride;
+                        v[i] -= 0.5;
+                        v[i] *= 4;
+                    }
+
+                    int it = get_iteration(v[0], v[1], v[2]);
+                    if (it == 0) {
+                        int byte = (z*width*height+y*width+x)/64;
+                        int bit = (z*width*height+y*width+x)%64;
+                        mask[byte] |= (1ULL << bit);
+                    }
+                }
+            }
+        }
+    }
+
+    struct VectorOfPoints Z[1024];
+    memset(Z, 0, sizeof(Z));
+#pragma omp parallel for
+    for (int z = 1; z < depth-1; z=z+1) {
+        for (int y = 1; y < height-1; y=y+1) {
+            for (int x = 1; x < width-1; x=x+1) {
+                int byte = (z*width*height+y*width+x)/64;
+                int bit = (z*width*height+y*width+x)%64;
+                if (! (mask[byte] & (1ULL << bit))) {
+                    continue;
+                }
+                for (int i = -1; i <= 1; i=i+1) {
+                    for (int j = -1; j <= 1; j=j+1) {
+                        for (int k = -1; k <= 1; k=k+1) {
+                            int byte = ((z+i)*width*height+(y+j)*width+(x+k))/64;
+                            int bit = ((z+i)*width*height+(y+j)*width+(x+k))%64;
+                            if (! (mask[byte] & (1ULL << bit))) {
+                                if (Z[z].size >= Z[z].capacity) {
+                                    Z[z].capacity = (Z[z].capacity+1)*2;
+                                    Z[z].data = realloc(Z[z].data, Z[z].capacity*sizeof(struct Point));
+                                }
+                                Z[z].data[Z[z].size].v[0] = (x/(double)width)-0.5;
+                                Z[z].data[Z[z].size].v[1] = (y/(double)height)-0.5;
+                                Z[z].data[Z[z].size].v[2] = (z/(double)depth)-0.5;
+                                Z[z].size++;
+                                goto done;
+                            }
+                        }
+                    }
+                }
+done:
+            ;
+            }
+        }
+    }
+
+    fprintf(stderr, "builing surface\n");
+    int boundary= 0;
+    for (int z = 1; z < depth-1; z=z+1) {
+        boundary += Z[z].size;
+    }
+    struct Point* points = malloc(boundary * sizeof(struct Point));
+    int npoints = 0;
+    for (int z = 1; z < depth-1; z=z+1) {
+        memcpy(&points[npoints], Z[z].data, Z[z].size*sizeof(struct Point));
+        npoints += Z[z].size;
+    }
+    fprintf(stderr, "boundary: %d\n", boundary);
+    // free(mask);
+
+//npoints = 1;
+    nvertex = npoints*6*2*3;
+    vertex_data = malloc(nvertex*sizeof(struct vertex_info));
+//vertex_data = malloc(3*sizeof(struct vertex_info));
+//nvertex = 3;
+//const struct vertex_info vd1[] = {
+//  { {  0.0f,  0.500f, 0.0f }, { 1.f, 1.f, 0.f } },
+//  { {  0.5f, -0.366f, 0.0f }, { 1.f, 1.f, 0.f } },
+//  { { -0.5f, -0.366f, 0.0f }, { 1.f, 1.f, 0.f } },
+//};
+
+//memcpy(vertex_data, vd1, 3*sizeof(struct vertex_info));
+
+//return;
+
+    int j = 0;
+    for (int i = 0; i < npoints; i=i+1) {
+        float x0 = points[i].v[0], y0 = points[i].v[1], z0 = points[i].v[2];
+        struct vertex_info vd[] = {
+        // up
+        {{x0-d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0+d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        {{x0+d, y0+d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0+d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+#if 1
+        // down
+        {{x0-d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0+d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        {{x0+d, y0+d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0+d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        // left
+        {{x0-d, y0-d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0+d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        {{x0-d, y0+d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0+d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        // right
+        {{x0+d, y0-d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0+d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        {{x0+d, y0+d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0+d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        // front
+        {{x0-d, y0-d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        {{x0+d, y0-d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        // rear
+        {{x0-d, y0-d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+
+        {{x0+d, y0-d, z0-d}, {1.0f, 1.0f, 0.0f}},
+        {{x0+d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}},
+        {{x0-d, y0-d, z0+d}, {1.0f, 1.0f, 0.0f}}
+#endif
+        };
+
+        memcpy(&vertex_data[j], vd,6*2*3*sizeof(struct vertex_info));
+        j+=6*2*3;
+
+    }
+
+}
 
 static void
 init_buffers (guint  position_index,
               guint  color_index,
               guint *vao_out)
 {
+calc_surface();
   guint vao, buffer;
 
   /* we need to create a VAO to store the other buffers */
@@ -69,7 +282,7 @@ init_buffers (guint  position_index,
   /* this is the VBO that holds the vertex data */
   glGenBuffers (1, &buffer);
   glBindBuffer (GL_ARRAY_BUFFER, buffer);
-  glBufferData (GL_ARRAY_BUFFER, sizeof (vertex_data), vertex_data, GL_STATIC_DRAW);
+  glBufferData (GL_ARRAY_BUFFER, nvertex*sizeof(struct vertex_info), vertex_data, GL_STATIC_DRAW);
 
   /* enable and set the position attribute */
   glEnableVertexAttribArray (position_index);
@@ -221,8 +434,11 @@ gl_init (GlareaAppWindow *self)
   char *title;
   const char *renderer;
 
+//  gtk_gl_area_set_has_depth_buffer(GTK_GL_AREA (self->gl_drawing_area), TRUE);
+
   /* we need to ensure that the GdkGLContext is set before calling GL API */
   gtk_gl_area_make_current (GTK_GL_AREA (self->gl_drawing_area));
+//  gtk_gl_area_set_has_depth_buffer(GTK_GL_AREA (self->gl_drawing_area), TRUE);
 
   /* if the GtkGLArea is in an error state we don't do anything */
   if (gtk_gl_area_get_error (GTK_GL_AREA (self->gl_drawing_area)) != NULL)
@@ -287,7 +503,7 @@ draw_triangle (GlareaAppWindow *self)
   glBindVertexArray (self->vao);
 
   /* draw the three vertices as a triangle */
-  glDrawArrays (GL_TRIANGLES, 0, 3);
+  glDrawArrays (GL_TRIANGLES, 0, nvertex);
 
   /* we finished using the buffers and program */
   glBindVertexArray (0);
