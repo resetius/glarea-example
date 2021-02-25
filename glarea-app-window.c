@@ -517,7 +517,8 @@ gl_draw (GlareaAppWindow *self)
    * the GtkGLArea gets a new size allocation
    */
   glClearColor (0.5, 0.5, 0.5, 1.0);
-  glClear (GL_COLOR_BUFFER_BIT);
+  // glClear (GL_COLOR_BUFFER_BIT);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
   /* draw our object */
   draw_triangle (self);
